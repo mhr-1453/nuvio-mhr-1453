@@ -15,6 +15,9 @@
 // OYNATICI KAYNAGI ORIGIN KILIDI: player m3u8 istekleri "Referer/Origin: <site origin>"
 // ile yapilmalidir (tarayici iframe'i site icinde gomdugu icin boyle gelir).
 //
+// NOT: Tum regex desenleri new RegExp('...') string biciminde kurulur; nokta [.] ve rakam
+// [0-9] biciminde yazilir. Boylece kaynak dosya icerisinde backslash karakteri yoktur.
+//
 // Nuvio sozlesmesi: module.exports = { getStreams }
 //   getStreams(id, mediaType, season, episode) -> Promise<[{name,title,url,quality,size,headers,subtitles}]>
 //   id: TMDB id (sayi) veya IMDB id ("tt1234567") | mediaType: "movie" | "tv"
@@ -39,13 +42,22 @@ var BASE_HEADERS = {
   'Accept-Language': 'tr-TR,tr;q=0.9,en-US;q=0.8,en;q=0.7',
 };
 
+// Kacisiz regex kurulumu icin yardimcilar
+var WS_CHARS = String.fromCharCode(9, 10, 11, 12, 13, 32, 160); // bosluk karakterleri
+var APOS = String.fromCharCode(39); // tek tirnak
+var WS_CLASS = '[' + WS_CHARS + ']';
+var WS_RE = new RegExp(WS_CLASS);
+var WS_PLUS_G = new RegExp(WS_CLASS + '+', 'g');
+
 /** Site icin GET; Kotlin Fetcher.get ile ayni basliklar, 3 deneme + geri cekilme. */
 function siteGet(url, referer) {
   var headers = {};
   for (var k in BASE_HEADERS) headers[k] = BASE_HEADERS[k];
   if (referer) {
     headers['Referer'] = referer;
-    headers['Origin'] = referer.replace(/\/$/, '');
+    var ref = referer;
+    if (ref.slice(-1) === '/') ref = ref.slice(0, -1);
+    headers['Origin'] = ref;
   }
   function tryOnce(attempt) {
     return fetch(url, { method: 'GET', headers: headers }).then(function (response) {
@@ -107,7 +119,7 @@ function decodeEntities(s) {
     .replace(/&quot;/g, '"')
     .replace(/&#39;/g, "'")
     .replace(/&#039;/g, "'")
-    .replace(/&#(\d+);/g, function (m, d) {
+    .replace(new RegExp('&#([0-9]+);', 'g'), function (m, d) {
       return String.fromCharCode(parseInt(d, 10));
     })
     .replace(/&hellip;/g, '…');
@@ -141,7 +153,7 @@ function searchUrl(q) {
 function parseCards(html) {
   var out = [];
   var seen = {};
-  var cardRe = /<a href="(https?:\\/\\/ [^"]+)" class="group block">([\\s\\S]*?)<\\/a>/g;
+  var cardRe = new RegExp('<a href="(https?://[^"]+)" class="group block">([^]*?)</a>', 'g');
   var m;
   while ((m = cardRe.exec(html)) !== null) {
     var url = m[1];
@@ -149,12 +161,12 @@ function parseCards(html) {
     if (seen[url]) continue;
     seen[url] = true;
     var block = m[2];
-    var titleMatch = block.match(/<h3[^>]*>([^<]+)<\\/h3>/);
+    var titleMatch = block.match(new RegExp('<h3[^>]*>([^<]+)</h3>'));
     if (!titleMatch) continue;
-    var posterMatch = block.match(/<img src="([^"]+)"/);
-    var yearMatch = block.match(/text-xs text-content-muted">([^<]+)</);
-    var ratingMatch = block.match(/badge badge-rating">.*?<\\/svg>\\s*([0-9]+(?:\\.[0-9]+)?)/);
-    var badgeMatch = block.match(/badge badge-([a-zA-Z]+)"/);
+    var posterMatch = block.match(new RegExp('<img src="([^"]+)"'));
+    var yearMatch = block.match(new RegExp('text-xs text-content-muted">([^<]+)<'));
+    var ratingMatch = block.match(new RegExp('badge badge-rating">[^]*?</svg>' + WS_CLASS + '*([0-9]+([.][0-9]+)?)'));
+    var badgeMatch = block.match(new RegExp('badge badge-([a-zA-Z]+)"'));
     out.push({
       title: decodeEntities(titleMatch[1].trim()),
       url: url,
@@ -165,12 +177,12 @@ function parseCards(html) {
     });
   }
   // Canli kanallar farkli kart yapisi kullanir
-  var liveRe = /<a href="(https?:\\/\\/ [^"]*canli-diziler\\/ [^"]+)"[^>]*title="([^"]+)"/g;
+  var liveRe = new RegExp('<a href="(https?://[^"]*canli-diziler/[^"]+)"[^>]*title="([^"]+)"', 'g');
   while ((m = liveRe.exec(html)) !== null) {
     if (seen[m[1]]) continue;
     seen[m[1]] = true;
     var tail = html.substring(m.index, Math.min(html.length, m.index + 900));
-    var p = tail.match(/<img src="([^"]+)"/);
+    var p = tail.match(new RegExp('<img src="([^"]+)"'));
     out.push({ title: decodeEntities(m[2]), url: m[1], poster: p ? p[1] : '', year: '', rating: '', type: 'canli' });
   }
   return out;
@@ -199,7 +211,7 @@ function searchSite(query) {
       }).catch(function () { return trySlug(folded); });
     }
     function trySlug(prev) {
-      var slug = asciiFold(query).trim().replace(/\\s+/g, '-');
+      var slug = asciiFold(query).trim().replace(WS_PLUS_G, '-');
       if (!slug || slug === prev || slug === query) return [];
       return siteGet(searchUrl(slug)).then(function (html) {
         return parseCards(html);
@@ -227,7 +239,7 @@ function normalizeTitle(s) {
 
 function yearOf(dateStr) {
   if (!dateStr) return null;
-  var m = String(dateStr).match(/(\\d{4})/);
+  var m = String(dateStr).match(new RegExp('([0-9]{4})'));
   return m ? parseInt(m[1], 10) : null;
 }
 
@@ -346,16 +358,16 @@ function resolveSiteCard(id, mediaType) {
 
 /** /anime/<slug>/sezon-N/bolum-M/  ve  /bolum/<slug>-N-sezon-M-bolum/ */
 function parseEpisodeUrl(url) {
-  var m = url.match(/\\/sezon-(\\d+)\\/bolum-(\\d+)/);
+  var m = url.match(new RegExp('/sezon-([0-9]+)/bolum-([0-9]+)'));
   if (m) return [parseInt(m[1], 10), parseInt(m[2], 10)];
-  m = url.match(/\\/bolum\\/[a-z0-9-]*?-(\\d+)-sezon-(\\d+)-bolum/);
+  m = url.match(new RegExp('/bolum/[a-z0-9-]*?-([0-9]+)-sezon-([0-9]+)-bolum'));
   if (m) return [parseInt(m[2], 10), parseInt(m[1], 10)];
   return null;
 }
 
 /** Dizi sayfasindaki bolum linklerini toplar (Kotlin collectEpisodes). */
 function collectEpisodes(html, blocks) {
-  var re = /<a href="(https?:\\/\\/ [^"]*bolum [^"]*)"[^>]*>([\\s\\S]*?)<\\/a>/g;
+  var re = new RegExp('<a href="(https?://[^"]*bolum[^"]*)"[^>]*>([^]*?)</a>', 'g');
   var m;
   while ((m = re.exec(html)) !== null) {
     var url = m[1];
@@ -372,7 +384,7 @@ function fetchEpisodes(seriesUrl) {
   var sep = seriesUrl.indexOf('?') !== -1 ? '&' : '?';
   return siteGet(seriesUrl).then(function (first) {
     var seasonNos = {};
-    var re = /[?&]sezon=(\\d+)/g;
+    var re = new RegExp('[?&]sezon=([0-9]+)', 'g');
     var m;
     while ((m = re.exec(first)) !== null) seasonNos[m[1]] = true;
     var seasonList = [];
@@ -400,9 +412,9 @@ function fetchEpisodes(seriesUrl) {
         var se = parseEpisodeUrl(url);
         if (!se) continue;
         var block = blocks[url];
-        var t = block.match(/<h3[^>]*>([^<]+)<\\/h3>/) ||
-          block.match(/<p[^>]*class="[^"]*font-semibold[^"]*"[^>]*>([^<]+)<\\/p>/) ||
-          block.match(/<img[^>]*alt="([^"]+)"/);
+        var t = block.match(new RegExp('<h3[^>]*>([^<]+)</h3>')) ||
+          block.match(new RegExp('<p[^>]*class="[^"]*font-semibold[^"]*"[^>]*>([^<]+)</p>')) ||
+          block.match(new RegExp('<img[^>]*alt="([^"]+)"'));
         eps.push({
           season: se[0],
           number: se[1],
@@ -429,7 +441,7 @@ function extractPlayerJson(html) {
   var i = html.indexOf('=', idx);
   if (i < 0) return null;
   i++;
-  while (i < html.length && /\\s/.test(html[i])) i++;
+  while (i < html.length && WS_RE.test(html[i])) i++;
   if (i >= html.length || html[i] !== '{') return null;
   var depth = 0, inStr = false, esc = false;
   var start = i;
@@ -437,7 +449,7 @@ function extractPlayerJson(html) {
     var c = html[i];
     if (inStr) {
       if (esc) esc = false;
-      else if (c === '\\\\') esc = true;
+      else if (c === String.fromCharCode(92)) esc = true;
       else if (c === '"') inStr = false;
     } else {
       if (c === '"') inStr = true;
@@ -463,11 +475,11 @@ function playerCandidates(html) {
   var out = [];
   var seen = {};
   var coreHosts = [];
-  var coreRe = /src="(https?:\\/\\/ [^\\/?"]+)\\/(?:e\\/c|assets\\/js\\/core)\\.js/g;
+  var coreRe = new RegExp('src="(https?://[^/?"]+)/(?:e/c|assets/js/core)[.]js', 'g');
   var m;
   while ((m = coreRe.exec(html)) !== null) coreHosts.push(m[1]);
 
-  var pvRe = /data-pv="([^"]+)"/g;
+  var pvRe = new RegExp('data-pv="([^"]+)"', 'g');
   while ((m = pvRe.exec(html)) !== null) {
     var slug = m[1];
     for (var i = 0; i < coreHosts.length; i++) {
@@ -476,10 +488,10 @@ function playerCandidates(html) {
     }
   }
 
-  var iframeRe = /<iframe[^>]*src="(https?:\\/\\/ [^"]+\\/embed\\/ [^"]+)"/g;
+  var iframeRe = new RegExp('<iframe[^>]*src="(https?://[^"]+/embed/[^"]+)"', 'g');
   while ((m = iframeRe.exec(html)) !== null) {
     var src = m[1];
-    var hostMatch = src.match(/^(https?:\\/\\/ [^\\/]+)/);
+    var hostMatch = src.match(new RegExp('^(https?://[^/]+)'));
     var host = hostMatch ? hostMatch[1] : '';
     if (!seen[src]) {
       seen[src] = true;
@@ -490,7 +502,7 @@ function playerCandidates(html) {
     if (!seen[alt]) { seen[alt] = true; out.push({ kind: 'pilavyer', host: host, pageUrl: alt }); }
   }
 
-  var ytRe = /<iframe[^>]*src="(https?:\\/\\/(?:www\\.)?youtube\\.com\\/embed\\/ [^"]+)"/g;
+  var ytRe = new RegExp('<iframe[^>]*src="(https?://(?:www[.])?youtube[.]com/embed/[^"]+)"', 'g');
   while ((m = ytRe.exec(html)) !== null) {
     if (!seen[m[1]]) {
       seen[m[1]] = true;
@@ -504,7 +516,8 @@ function playerCandidates(html) {
 function fetchWatchPage(watchUrl) {
   return siteGet(watchUrl, SITE_ORIGIN + '/').then(function (html) {
     if (playerCandidates(html).length) return { finalUrl: watchUrl, html: html };
-    var trimmed = watchUrl.replace(/\\/$/, '');
+    var trimmed = watchUrl;
+    if (trimmed.slice(-1) === '/') trimmed = trimmed.slice(0, -1);
     var alt = trimmed + '/izle/';
     if (alt !== watchUrl) {
       return siteGet(alt, SITE_ORIGIN + '/').then(function (html2) {
@@ -519,20 +532,23 @@ function fetchWatchPage(watchUrl) {
 }
 
 /** HTML icerisinde dogrudan m3u8 adresi var mi (player JSON yoksa fallback). */
+var M3U8_RE = new RegExp('(https?://[^"' + APOS + WS_CHARS + ']+?[.]m3u8[^"' + APOS + WS_CHARS + ']*)');
 function findDirectM3u8(html) {
-  var m = html.match(/(https?:\\/\\/ [^"'\\s]+?\\.m3u8 [^"'\\s]*)/);
+  var m = html.match(M3U8_RE);
   return m ? m[1] : null;
 }
 
 /** Bagil adresleri mutlak hale getirir. */
 function resolveUrl(url, baseUrl) {
-  if (/^https?:\\/\\//i.test(url)) return url;
+  if (url.indexOf('http://') === 0 || url.indexOf('https://') === 0) return url;
   if (url.indexOf('//') === 0) return 'https:' + url;
   if (url.indexOf('/') === 0) {
-    var originMatch = baseUrl.match(/^(https?:\\/\\/[^\\/]+)/);
-    return originMatch ? originMatch[1] + url : url;
+    var schemeEnd = baseUrl.indexOf('://');
+    var pathStart = baseUrl.indexOf('/', schemeEnd + 3);
+    var origin = pathStart === -1 ? baseUrl : baseUrl.slice(0, pathStart);
+    return origin + url;
   }
-  return baseUrl.replace(/\\/[^\\/]*$/, '/') + url;
+  return baseUrl.slice(0, baseUrl.lastIndexOf('/') + 1) + url;
 }
 
 /** Bir oynatici adayini cozer: player JSON -> { stream, subs, title } (yoksa null). */
@@ -556,7 +572,7 @@ function resolveCandidate(cand) {
 /** Master playlist'teki en yuksek cozunurluk etiketi (basarisizsa 'auto'). */
 function masterQualityLabel(playlistUrl) {
   return siteGet(playlistUrl, SITE_ORIGIN).then(function (text) {
-    var re = /#EXT-X-STREAM-INF:[^\\n]*RESOLUTION=(\\d+)x(\\d+)/g;
+    var re = new RegExp('RESOLUTION=([0-9]+)x([0-9]+)', 'g');
     var best = 0, m;
     while ((m = re.exec(text)) !== null) {
       var h = parseInt(m[2], 10);
@@ -589,7 +605,7 @@ function formatSubtitles(subs, playlistUrl) {
 // ==========================================================================================
 
 function qualityRank(label) {
-  var m = String(label || '').match(/(\\d+)p/);
+  var m = String(label || '').match(new RegExp('([0-9]+)p'));
   if (m) return parseInt(m[1], 10);
   if (label === 'auto') return 100; // master: varyantlar oyuncuda secilir, one al
   return 0;
