@@ -141,7 +141,7 @@ function searchUrl(q) {
 function parseCards(html) {
   var out = [];
   var seen = {};
-  var cardRe = /<a href="(https?:\/\/ [^"]+)" class="group block">([\s\S]*?)<\/a>/g;
+  var cardRe = /<a href="(https?:\\/\\/ [^"]+)" class="group block">([\\s\\S]*?)<\\/a>/g;
   var m;
   while ((m = cardRe.exec(html)) !== null) {
     var url = m[1];
@@ -149,11 +149,11 @@ function parseCards(html) {
     if (seen[url]) continue;
     seen[url] = true;
     var block = m[2];
-    var titleMatch = block.match(/<h3[^>]*>([^<]+)<\/h3>/);
+    var titleMatch = block.match(/<h3[^>]*>([^<]+)<\\/h3>/);
     if (!titleMatch) continue;
     var posterMatch = block.match(/<img src="([^"]+)"/);
     var yearMatch = block.match(/text-xs text-content-muted">([^<]+)</);
-    var ratingMatch = block.match(/badge badge-rating">.*?<\/svg>\s*([0-9]+(?:\.[0-9]+)?)/);
+    var ratingMatch = block.match(/badge badge-rating">.*?<\\/svg>\\s*([0-9]+(?:\\.[0-9]+)?)/);
     var badgeMatch = block.match(/badge badge-([a-zA-Z]+)"/);
     out.push({
       title: decodeEntities(titleMatch[1].trim()),
@@ -165,7 +165,7 @@ function parseCards(html) {
     });
   }
   // Canli kanallar farkli kart yapisi kullanir
-  var liveRe = /<a href="(https?:\/\/ [^"]*canli-diziler\/ [^"]+)"[^>]*title="([^"]+)"/g;
+  var liveRe = /<a href="(https?:\\/\\/ [^"]*canli-diziler\\/ [^"]+)"[^>]*title="([^"]+)"/g;
   while ((m = liveRe.exec(html)) !== null) {
     if (seen[m[1]]) continue;
     seen[m[1]] = true;
@@ -199,7 +199,7 @@ function searchSite(query) {
       }).catch(function () { return trySlug(folded); });
     }
     function trySlug(prev) {
-      var slug = asciiFold(query).trim().replace(/\s+/g, '-');
+      var slug = asciiFold(query).trim().replace(/\\s+/g, '-');
       if (!slug || slug === prev || slug === query) return [];
       return siteGet(searchUrl(slug)).then(function (html) {
         return parseCards(html);
@@ -227,7 +227,7 @@ function normalizeTitle(s) {
 
 function yearOf(dateStr) {
   if (!dateStr) return null;
-  var m = String(dateStr).match(/(\d{4})/);
+  var m = String(dateStr).match(/(\\d{4})/);
   return m ? parseInt(m[1], 10) : null;
 }
 
@@ -346,16 +346,16 @@ function resolveSiteCard(id, mediaType) {
 
 /** /anime/<slug>/sezon-N/bolum-M/  ve  /bolum/<slug>-N-sezon-M-bolum/ */
 function parseEpisodeUrl(url) {
-  var m = url.match(/\/sezon-(\d+)\/bolum-(\d+)/);
+  var m = url.match(/\\/sezon-(\\d+)\\/bolum-(\\d+)/);
   if (m) return [parseInt(m[1], 10), parseInt(m[2], 10)];
-  m = url.match(/\/bolum\/[a-z0-9-]*?-(\d+)-sezon-(\d+)-bolum/);
+  m = url.match(/\\/bolum\\/[a-z0-9-]*?-(\\d+)-sezon-(\\d+)-bolum/);
   if (m) return [parseInt(m[2], 10), parseInt(m[1], 10)];
   return null;
 }
 
 /** Dizi sayfasindaki bolum linklerini toplar (Kotlin collectEpisodes). */
 function collectEpisodes(html, blocks) {
-  var re = /<a href="(https?:\/\/ [^"]*bolum [^"]*)"[^>]*>([\s\S]*?)<\/a>/g;
+  var re = /<a href="(https?:\\/\\/ [^"]*bolum [^"]*)"[^>]*>([\\s\\S]*?)<\\/a>/g;
   var m;
   while ((m = re.exec(html)) !== null) {
     var url = m[1];
@@ -372,7 +372,7 @@ function fetchEpisodes(seriesUrl) {
   var sep = seriesUrl.indexOf('?') !== -1 ? '&' : '?';
   return siteGet(seriesUrl).then(function (first) {
     var seasonNos = {};
-    var re = /[?&]sezon=(\d+)/g;
+    var re = /[?&]sezon=(\\d+)/g;
     var m;
     while ((m = re.exec(first)) !== null) seasonNos[m[1]] = true;
     var seasonList = [];
@@ -400,8 +400,8 @@ function fetchEpisodes(seriesUrl) {
         var se = parseEpisodeUrl(url);
         if (!se) continue;
         var block = blocks[url];
-        var t = block.match(/<h3[^>]*>([^<]+)<\/h3>/) ||
-          block.match(/<p[^>]*class="[^"]*font-semibold[^"]*"[^>]*>([^<]+)<\/p>/) ||
+        var t = block.match(/<h3[^>]*>([^<]+)<\\/h3>/) ||
+          block.match(/<p[^>]*class="[^"]*font-semibold[^"]*"[^>]*>([^<]+)<\\/p>/) ||
           block.match(/<img[^>]*alt="([^"]+)"/);
         eps.push({
           season: se[0],
@@ -429,7 +429,7 @@ function extractPlayerJson(html) {
   var i = html.indexOf('=', idx);
   if (i < 0) return null;
   i++;
-  while (i < html.length && /\s/.test(html[i])) i++;
+  while (i < html.length && /\\s/.test(html[i])) i++;
   if (i >= html.length || html[i] !== '{') return null;
   var depth = 0, inStr = false, esc = false;
   var start = i;
@@ -437,7 +437,7 @@ function extractPlayerJson(html) {
     var c = html[i];
     if (inStr) {
       if (esc) esc = false;
-      else if (c === '\\') esc = true;
+      else if (c === '\\\\') esc = true;
       else if (c === '"') inStr = false;
     } else {
       if (c === '"') inStr = true;
@@ -463,7 +463,7 @@ function playerCandidates(html) {
   var out = [];
   var seen = {};
   var coreHosts = [];
-  var coreRe = /src="(https?:\/\/ [^\/?"]+)\/(?:e\/c|assets\/js\/core)\.js/g;
+  var coreRe = /src="(https?:\\/\\/ [^\\/?"]+)\\/(?:e\\/c|assets\\/js\\/core)\\.js/g;
   var m;
   while ((m = coreRe.exec(html)) !== null) coreHosts.push(m[1]);
 
@@ -476,10 +476,10 @@ function playerCandidates(html) {
     }
   }
 
-  var iframeRe = /<iframe[^>]*src="(https?:\/\/ [^"]+\/embed\/ [^"]+)"/g;
+  var iframeRe = /<iframe[^>]*src="(https?:\\/\\/ [^"]+\\/embed\\/ [^"]+)"/g;
   while ((m = iframeRe.exec(html)) !== null) {
     var src = m[1];
-    var hostMatch = src.match(/^(https?:\/\/ [^\/]+)/);
+    var hostMatch = src.match(/^(https?:\\/\\/ [^\\/]+)/);
     var host = hostMatch ? hostMatch[1] : '';
     if (!seen[src]) {
       seen[src] = true;
@@ -490,7 +490,7 @@ function playerCandidates(html) {
     if (!seen[alt]) { seen[alt] = true; out.push({ kind: 'pilavyer', host: host, pageUrl: alt }); }
   }
 
-  var ytRe = /<iframe[^>]*src="(https?:\/\/(?:www\.)?youtube\.com\/embed\/ [^"]+)"/g;
+  var ytRe = /<iframe[^>]*src="(https?:\\/\\/(?:www\\.)?youtube\\.com\\/embed\\/ [^"]+)"/g;
   while ((m = ytRe.exec(html)) !== null) {
     if (!seen[m[1]]) {
       seen[m[1]] = true;
@@ -504,7 +504,7 @@ function playerCandidates(html) {
 function fetchWatchPage(watchUrl) {
   return siteGet(watchUrl, SITE_ORIGIN + '/').then(function (html) {
     if (playerCandidates(html).length) return { finalUrl: watchUrl, html: html };
-    var trimmed = watchUrl.replace(/\/$/, '');
+    var trimmed = watchUrl.replace(/\\/$/, '');
     var alt = trimmed + '/izle/';
     if (alt !== watchUrl) {
       return siteGet(alt, SITE_ORIGIN + '/').then(function (html2) {
@@ -520,19 +520,19 @@ function fetchWatchPage(watchUrl) {
 
 /** HTML icerisinde dogrudan m3u8 adresi var mi (player JSON yoksa fallback). */
 function findDirectM3u8(html) {
-  var m = html.match(/(https?:\/\/ [^"'\s]+?\.m3u8 [^"'\s]*)/);
+  var m = html.match(/(https?:\\/\\/ [^"'\\s]+?\\.m3u8 [^"'\\s]*)/);
   return m ? m[1] : null;
 }
 
 /** Bagil adresleri mutlak hale getirir. */
 function resolveUrl(url, baseUrl) {
-  if (/^https?:\/\//i.test(url)) return url;
+  if (/^https?:\\/\\//i.test(url)) return url;
   if (url.indexOf('//') === 0) return 'https:' + url;
   if (url.indexOf('/') === 0) {
-    var originMatch = baseUrl.match(/^(https?:\/\/[^\/]+)/);
+    var originMatch = baseUrl.match(/^(https?:\\/\\/[^\\/]+)/);
     return originMatch ? originMatch[1] + url : url;
   }
-  return baseUrl.replace(/\/[^\/]*$/, '/') + url;
+  return baseUrl.replace(/\\/[^\\/]*$/, '/') + url;
 }
 
 /** Bir oynatici adayini cozer: player JSON -> { stream, subs, title } (yoksa null). */
@@ -556,7 +556,7 @@ function resolveCandidate(cand) {
 /** Master playlist'teki en yuksek cozunurluk etiketi (basarisizsa 'auto'). */
 function masterQualityLabel(playlistUrl) {
   return siteGet(playlistUrl, SITE_ORIGIN).then(function (text) {
-    var re = /#EXT-X-STREAM-INF:[^\n]*RESOLUTION=(\d+)x(\d+)/g;
+    var re = /#EXT-X-STREAM-INF:[^\\n]*RESOLUTION=(\\d+)x(\\d+)/g;
     var best = 0, m;
     while ((m = re.exec(text)) !== null) {
       var h = parseInt(m[2], 10);
@@ -589,7 +589,7 @@ function formatSubtitles(subs, playlistUrl) {
 // ==========================================================================================
 
 function qualityRank(label) {
-  var m = String(label || '').match(/(\d+)p/);
+  var m = String(label || '').match(/(\\d+)p/);
   if (m) return parseInt(m[1], 10);
   if (label === 'auto') return 100; // master: varyantlar oyuncuda secilir, one al
   return 0;
