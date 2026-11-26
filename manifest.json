@@ -1,8 +1,8 @@
 {
   "name": "Nuvio Eklenti Deposu",
   "author": "nuvio-eklenti-deposu",
-  "version": "1.0.0",
-  "description": "Turkce anime eklentileri. Ilk eklenti: AnimeciX (animecix.tv) - Turkce altyazili/dublajli anime akislari.",
+  "version": "1.1.0",
+  "description": "Turkce icerik eklentileri: AnimeciX (animecix.tv) anime akislari ve SuperFilmIzle (superfilmizle2.icu) film/dizi/anime akislari.",
   "scrapers": [
     {
       "id": "animecix",
@@ -16,6 +16,22 @@
       "formats": ["mp4", "m3u8"],
       "logo": "",
       "contentLanguage": ["tr", "ja"],
+      "limited": false,
+      "disabledPlatforms": [],
+      "supportsExternalPlayer": true
+    },
+    {
+      "id": "superfilmizle",
+      "name": "SuperFilmIzle",
+      "description": "SuperFilmIzle (superfilmizle2.icu) uzerinden Turkce film, dizi ve anime akislari. Pilavyer ve embed oynaticilarini HLS (m3u8) olarak cozer, Turkce altyazilari destekler.",
+      "version": "1.0.0",
+      "author": "SuperFilmIzle Scraper",
+      "supportedTypes": ["movie", "tv"],
+      "filename": "providers/superfilmizle.js",
+      "enabled": true,
+      "formats": ["m3u8"],
+      "logo": "",
+      "contentLanguage": ["tr"],
       "limited": false,
       "disabledPlatforms": [],
       "supportsExternalPlayer": true
