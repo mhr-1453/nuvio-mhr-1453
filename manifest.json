@@ -1,0 +1,24 @@
+{
+  "name": "Nuvio Eklenti Deposu",
+  "author": "nuvio-eklenti-deposu",
+  "version": "1.0.0",
+  "description": "Turkce anime eklentileri. Ilk eklenti: AnimeciX (animecix.tv) - Turkce altyazili/dublajli anime akislari.",
+  "scrapers": [
+    {
+      "id": "animecix",
+      "name": "AnimeciX",
+      "description": "AnimeciX (animecix.tv) uzerinden Turkce altyazili ve dublajli anime akislari. Tau Video, Sibnet, OK.ru, Dailymotion, Doodstream, Uqload, Vidmoly ve Streamtape kaynaklarini destekler.",
+      "version": "1.0.0",
+      "author": "AnimeciX Scraper",
+      "supportedTypes": ["movie", "tv", "anime"],
+      "filename": "providers/animecix.js",
+      "enabled": true,
+      "formats": ["mp4", "m3u8"],
+      "logo": "",
+      "contentLanguage": ["tr", "ja"],
+      "limited": false,
+      "disabledPlatforms": [],
+      "supportsExternalPlayer": true
+    }
+  ]
+}
