@@ -1237,3 +1237,4 @@ if (typeof module !== 'undefined' && module.exports) {
 } else {
   global.AnimeciXScraperModule = { getStreams: getStreams };
 }
+
