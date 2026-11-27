@@ -21,3 +21,12 @@ Nuvio uygulaması için Türkçe içerik eklentileri.
 | **AnimeciX** | animecix.tv | Anime (Türkçe altyazılı + dublaj) | MP4, m3u8 |
 | **SuperFilmIzle** | superfilmizle2.icu | Film, dizi, anime (Türkçe) | m3u8 |
 | **FilmIzyon** | filmizyon.net | Film, dizi, anime (Türkçe) | m3u8 |
+
+## Yasal Uyarı
+
+Bu depo **herhangi bir video, film, dizi, anime veya medya dosyası barındırmaz**. Depoda yalnızca üçüncü taraf, herkese açık web sitelerinin herkese açık sayfalarına erişim sağlayan arama ve bağlantı çözücü kodlar (scraper) bulunur.
+
+- Hiçbir içerik bu depoda saklanmaz, yayımlanmaz veya dağıtılmaz.
+- Tüm medya bağlantıları, kullanıcı tarafından seçilen üçüncü taraf kaynak sitelerden, çalışma anında alınır.
+- Tüm içerik hakları ilgili hak sahiplerine aittir. Telif hakkı talepleri, ilgili içeriğin barındırıldığı kaynağa yapılmalıdır.
+- Bu proje yalnızca eğitim ve kişisel kullanım amaçlıdır; hiçbir içerik sağlayıcı siteyle bağlantısı yoktur.
