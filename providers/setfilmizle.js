@@ -27,8 +27,20 @@
 //   - StreamProxy / serve komutu ve binary segment indirme yalnizca Node CLI icindir;
 //     Nuvio oynaticisi headers alanindaki X-Sp/Referer/Origin ile dogrudan oynatir.
 //
+// scraper v3 hizalama notlari (setfilm-scraper.js guncel surumu):
+//   - X-Sp bir NONCE'dir: ayni deger ikinci kez gonderilirse 404 (replay korumasi).
+//     Her istekte yeni rand uretilir; zaman damgasi sayfa render anindan gecen
+//     sureyle ilerletilir: buildXSp(sp, spT, pageAt).
+//   - Manifest istekleri 404/403/429/520-524 donerse artan beklemeyle yeni X-Sp
+//     uretilerek tekrar denenir (parseManifest mantiginin karsiligi).
+//   - Guard akisi 7 denemeye genisletildi (800/1500/2500/4000/6000/8000 ms); her
+//     denemede fastplay sayfasi tazelenir, STF_KOPRU + SPG_A yeniden okunur.
+//   - get_video_url basarisizsa bir kez taze=1 parametresiyle yeniden denenir.
+//   - Icerik sayfasinda nonce yoksa anasayfa ('/') nonce'u yedek olarak kullanilir.
+//
 // WAF KURALLARI (fastplay.mom):
 //   - .m3u8/.txt istekleri X-Sp basligi olmadan -> 404
+//   - Ayni X-Sp degeri ikinci kez -> 404 (replay korumasi)
 //   - "Accept: text/html..." ve Accept-Language basliklari m3u8 isteklerinde -> 404
 //     (medya isteklerinde Accept: */* ve Accept-Language YOK gonderilir)
 //   - X-Sp zaman damgasi fastplay sayfasinin render anina baglidir; hata alinirsa
@@ -213,10 +225,19 @@ function fnv1a32(str) {
   return hex;
 }
 
-/** sp + spT ciftinden X-Sp baslik degerini uretir (sayfanin JS mantigiyla ayni). */
-function buildXSp(sp, spT) {
+/**
+ * sp + spT ciftinden X-Sp baslik degerini uretir (sayfanin JS mantigiyla ayni).
+ * ONEMLI: sunucu X-Sp degerini NONCE gibi kullanir — ayni deger ikinci kez
+ * gonderilirse 404 doner. Bu yuzden HER istek icin yeni rand uretilir ve
+ * zaman damgasi sayfa render anindan gecen sureyle ilerletilir (pageAt).
+ */
+function buildXSp(sp, spT, pageAt) {
   var seed = sp || '';
   var base = Number(spT) || 0;
+  if (pageAt) {
+    var elapsed = Math.floor((Date.now() - pageAt) / 1000);
+    if (elapsed > 0) base += elapsed;
+  }
   var rand = Math.floor(2176782336 * Math.random()).toString(36);
   return base + '.' + rand + '.' + fnv1a32(seed + '|' + base + '|' + rand);
 }
@@ -701,31 +722,38 @@ function extractNonce(html) {
   return m ? m[1] : null;
 }
 
-/** admin-ajax get_video_url -> stream JSON'u. */
+/** admin-ajax get_video_url -> stream JSON'u (basarisizsa bir kez taze=1 ile dener). */
 function fetchVideoJson(postId, nonce, pageUrl) {
-  var form = 'action=get_video_url' +
-    '&nonce=' + encodeURIComponent(nonce) +
-    '&post_id=' + encodeURIComponent(postId) +
-    '&player_name=' + encodeURIComponent('SetPlay') +
-    '&part_key=';
-  return httpReq(AJAX_URL, {
-    method: 'POST',
-    body: form,
-    contentType: 'application/x-www-form-urlencoded',
-    referer: pageUrl || BASE_URL + '/',
-    headers: { 'X-Requested-With': 'XMLHttpRequest' },
-  }).then(function (res) {
-    if (res.status >= 400) throw new Error('get_video_url HTTP ' + res.status);
-    var json;
-    try {
-      json = JSON.parse(res.text);
-    } catch (e) {
-      throw new Error('get_video_url JSON degil: ' + res.text.slice(0, 120));
-    }
-    if (!json.success || !json.data) {
-      throw new Error('get_video_url basarisiz: ' + JSON.stringify(json).slice(0, 200));
-    }
-    return json.data;
+  function once(useFresh) {
+    var form = 'action=get_video_url' +
+      '&nonce=' + encodeURIComponent(nonce) +
+      '&post_id=' + encodeURIComponent(postId) +
+      '&player_name=' + encodeURIComponent('SetPlay') +
+      '&part_key=' +
+      (useFresh ? '&taze=1' : '');
+    return httpReq(AJAX_URL, {
+      method: 'POST',
+      body: form,
+      contentType: 'application/x-www-form-urlencoded',
+      referer: pageUrl || BASE_URL + '/',
+      headers: { 'X-Requested-With': 'XMLHttpRequest' },
+    }).then(function (res) {
+      if (res.status >= 400) throw new Error('get_video_url HTTP ' + res.status);
+      var json;
+      try {
+        json = JSON.parse(res.text);
+      } catch (e) {
+        throw new Error('get_video_url JSON degil: ' + res.text.slice(0, 120));
+      }
+      if (!json.success || !json.data) {
+        throw new Error('get_video_url basarisiz: ' + JSON.stringify(json).slice(0, 200));
+      }
+      return json.data;
+    });
+  }
+  return once(false).catch(function (err) {
+    // scraper v3: sunucu cache'lenmis/otuken sonucu reddedebilir; taze=1 ile bir kez daha dene
+    return once(true).catch(function () { throw err; });
   });
 }
 
@@ -759,27 +787,45 @@ function extractKopru(html) {
 
 /**
  * HLS master manifest'ini X-Sp guard ile ceker ve ayristirir.
- * Donus: { status, quality, subtitles, text }
+ * Donus: Promise<text>
+ * fastplay.mom manifesti yeniden uretirken 404/403/429/520-524 dondurebiliyor;
+ * her denemede YENI bir X-Sp uretilir (replay korumasi: ayni deger 404 verir).
  */
-function fetchManifest(manifestUrl, fastplayUrl, spgA) {
-  var headers = {};
-  if (spgA && spgA.sp !== undefined) {
-    headers['X-Sp'] = buildXSp(spgA.sp, spgA.spT);
-  }
-  return httpReq(manifestUrl, {
-    referer: fastplayUrl,
-    origin: originOf(fastplayUrl),
-    accept: '*/*',
-    acceptLanguage: false,
-    headers: headers,
-  }).then(function (res) {
-    if (res.status !== 200) {
-      var err = new Error('manifest HTTP ' + res.status);
-      err.status = res.status;
-      throw err;
+function fetchManifest(manifestUrl, fastplayUrl, spgA, pageAt) {
+  var RETRY_STATUSES = [404, 403, 429, 520, 521, 522, 523, 524];
+  var delays = [1000, 2000, 3000, 5000, 8000];
+  var attempt = 0;
+
+  function once() {
+    var headers = {};
+    if (spgA && spgA.sp !== undefined) {
+      headers['X-Sp'] = buildXSp(spgA.sp, spgA.spT, pageAt);
     }
-    return res.text;
-  });
+    return httpReq(manifestUrl, {
+      referer: fastplayUrl,
+      origin: originOf(fastplayUrl),
+      accept: '*/*',
+      acceptLanguage: false,
+      headers: headers,
+    }).then(function (res) {
+      if (res.status !== 200) {
+        var err = new Error('manifest HTTP ' + res.status);
+        err.status = res.status;
+        throw err;
+      }
+      return res.text;
+    });
+  }
+
+  function attemptLoop() {
+    return once().catch(function (err) {
+      var st = err && err.status;
+      var retryable = RETRY_STATUSES.indexOf(st) !== -1;
+      if (!retryable || attempt >= delays.length) throw err;
+      return sleep(delays[attempt++]).then(attemptLoop);
+    });
+  }
+  return attemptLoop();
 }
 
 /** Master playlist metninden en yuksek cozunurlugu cikarir. */
@@ -835,25 +881,28 @@ function formatExternalSubtitles(subs, baseUrl) {
 
 /**
  * Fastplay sayfasini + manifesti guard ile cozer.
- * Hata durumunda fastplay sayfasi tazelenir (X-Sp zaman damgasi render'a bagli).
+ * Hata durumunda fastplay sayfasi tazelenir (X-Sp zaman damgasi render'a bagli)
+ * ve STF_KOPRU + SPG_A her denemede yeniden okunur (scraper v3: 7 deneme).
  */
 function resolveFastplay(fastplayUrl, maxAttempts) {
-  var attempts = maxAttempts || 3;
-  var delays = [1200, 2500, 4000];
+  var delays = [800, 1500, 2500, 4000, 6000, 8000];
+  var attempts = maxAttempts || (delays.length + 1);
   var attempt = 0;
 
   function tryOnce() {
+    var pageAt = Date.now();
     return siteGet(fastplayUrl, BASE_URL + '/').then(function (html) {
       var kopru = extractKopru(html);
       if (!kopru || !kopru.src) throw new Error('STF_KOPRU bulunamadi');
       var manifestUrl = /^http/i.test(kopru.src) ? kopru.src : originOf(fastplayUrl) + kopru.src;
       var spgA = extractSpgA(html) || null;
-      return fetchManifest(manifestUrl, fastplayUrl, spgA).then(function (text) {
+      return fetchManifest(manifestUrl, fastplayUrl, spgA, pageAt).then(function (text) {
         return {
           manifestUrl: manifestUrl,
           quality: masterQualityLabel(text),
           subtitles: manifestSubtitleTracks(text, manifestUrl),
           spgA: spgA,
+          pageAt: pageAt,
         };
       });
     });
@@ -878,9 +927,15 @@ function resolvePageSources(pageUrl) {
     var postId = extractPostId(html);
     if (!postId) throw new Error('post-id bulunamadi: ' + pageUrl);
     var nonce = extractNonce(html);
-    if (!nonce) throw new Error('video nonce bulunamadi: ' + pageUrl);
-
-    return fetchVideoJson(postId, nonce, pageUrl).then(function (data) {
+    // scraper v3: nonce sayfaya ozeldir; icerik sayfasinda yoksa anasayfa yedek
+    if (nonce) return { postId: postId, nonce: nonce };
+    return siteGet(BASE_URL + '/').then(function (homeHtml) {
+      var homeNonce = extractNonce(homeHtml);
+      if (!homeNonce) throw new Error('video nonce bulunamadi: ' + pageUrl);
+      return { postId: postId, nonce: homeNonce };
+    });
+  }).then(function (found) {
+    return fetchVideoJson(found.postId, found.nonce, pageUrl).then(function (data) {
       var stream = data.stream || {};
       var results = [];
       var externalSubs = formatExternalSubtitles(stream.subtitles, pageUrl);
@@ -905,7 +960,7 @@ function resolvePageSources(pageUrl) {
       // Bridge zinciri (setplay -> fastplay -> master.txt)
       if (stream.type === 'bridge' && stream.url) {
         return resolveBridge(stream.url).then(function (fastplayUrl) {
-          return resolveFastplay(fastplayUrl, 3).then(function (resolved) {
+          return resolveFastplay(fastplayUrl, 7).then(function (resolved) {
             // Oncelik: manifest icindeki SUBTITLES izleri (ayni verify token'ini
             // paylasirlar, harici dosyalardan daha guvenilir). Harici altyazilar yedek.
             var subs = resolved.subtitles.length ? resolved.subtitles : externalSubs;
@@ -925,7 +980,7 @@ function resolvePageSources(pageUrl) {
                 'Referer': fastplayUrl,
                 'Origin': originOf(fastplayUrl),
                 'Accept': '*/*',
-                'X-Sp': resolved.spgA ? buildXSp(resolved.spgA.sp, resolved.spgA.spT) : undefined,
+                'X-Sp': resolved.spgA ? buildXSp(resolved.spgA.sp, resolved.spgA.spT, resolved.pageAt) : undefined,
               },
             });
             return results;
