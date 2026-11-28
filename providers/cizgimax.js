@@ -3,8 +3,7 @@
 // ------------------------------------------------------------------------------------------
 // Kaynak: cizgimax-scraper.js (tek dosya Node CLI scraper) Nuvio sozlesmesine cevirilmistir.
 //
-// Site : https://cizgimax.online  (Turkce cizgi film / anime / dizi katalogu;
-//        sunucu taraflı PHP + ArtPlayer 5 oynatıcı)
+// Site : https://cizgimax.online  (Turkce cizgi film / anime / dizi katalogu; PHP + ArtPlayer)
 //
 // AKIS HARITASI
 //   GET /api/search/suggest/?q=<q> ......... canli arama onerileri (JSON)
@@ -18,30 +17,33 @@
 //   GET /api/np-resolve/?t=<token> ......... np (native) -> {id}
 //   GET tau-video.xyz/api/video?id=<id> .... np upstream -> {urls[], captions[]}
 //   POST /api/sign-np/ (X-CSRF-Token) ...... upstream URL'leri /api/stream/dzen/?s= imzali URL
+//   GET /api/stream/dzen/?s=<sig> .......... imzali HLS
 //   GET dzen.ru/embed/<id> ................. "url":"https://vd..." HLS/DASH kaynaklari
 //   GET <hdfc metaUrl> ..................... {hls, subtitles}
 //
 // CLOUDFLARE / ORIGIN STRATEJISI
 //   cizgimax.online datacenter IP'lerden "Bir dakika lutfen..." (Turnstile) challenge
 //   dondurebilir. Ayni uygulamanin origin sunucusu streamh.cizgimax.online CF arkasinda
-//   degildir. HTTP katmani canonical -> origin otomatik gecer ve origin'de
+//   degildir. HTTP katmani canonical -> origin otomatik gecer ve origin isteklerinde
 //   "X-Forwarded-Host: cizgimax.online" + "Referer: https://cizgimax.online/" basliklari
-//   gondererek sitenin "sadece cizgimax.online uzerinde oynatilabilir" kontrolunu gecer.
+//   gonderilerek sitenin "sadece cizgimax.online uzerinde oynatilabilir" kontrolu gecilir.
 //
 // Nuvio sozlesmesi: module.exports = { getStreams }
 //   getStreams(id, mediaType, season, episode) -> Promise<[{name,title,url,quality,size,headers,subtitles}]>
 //   id: TMDB id (sayi) veya IMDB id ("tt1234567") | mediaType: "movie" | "tv"
 //
 // HAYATA GERCEK ORTAMDA (Hermes): async/await YOK — tamami Promise zinciri, ES5 tarzidir.
+//   (Buffer, execSync, CLI komutlari ve AbortController yalnizca kaynak CLI'da vardi;
+//    burada saf JS base64 cozucu ve Nuvio'nun global fetch'i kullanilir.)
 // ==========================================================================================
 'use strict';
 
 var BASE_URL = 'https://cizgimax.online';
 var ORIGIN_URL = 'https://streamh.cizgimax.online';
 var SITE_REFERER = 'https://cizgimax.online/';
-var NP_API_URL = 'https://tau-video.xyz/api/video?id=';
 var DZEN_REFERER = 'https://dzen.ru/';
 var SIBNET_REFERER = 'https://video.sibnet.ru/';
+var NP_API_URL = 'https://tau-video.xyz/api/video?id=';
 
 var USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36';
 var ACCEPT_LANGUAGE = 'tr-TR,tr;q=0.9,en-US;q=0.8,en;q=0.7';
@@ -59,12 +61,8 @@ var DZEN_QUALITY = {
   tiny: '144p',
 };
 
-// null | 'canonical' | 'origin' — CF challenge gorulurse origin'e gecer.
+// null = canonical (CF ile korunur) | 'origin' = streamh.cizgimax.online
 var activeHost = null;
-
-function siteBase() {
-  return activeHost === 'origin' ? ORIGIN_URL : BASE_URL;
-}
 
 function sleep(ms) {
   return new Promise(function (resolve) { setTimeout(resolve, ms); });
@@ -83,8 +81,8 @@ function decodeEntities(s) {
     .replace(/&amp;/g, '&')
     .replace(/&lt;/g, '<')
     .replace(/&gt;/g, '>')
-    .replace(/&#([0-9]+);/g, function (_, d) { return String.fromCharCode(parseInt(d, 10)); })
-    .replace(/&#x([0-9a-fA-F]+);/g, function (_, h) { return String.fromCharCode(parseInt(h, 16)); });
+    .replace(/&#([0-9]+);/g, function (m, d) { return String.fromCharCode(parseInt(d, 10)); })
+    .replace(/&#x([0-9a-fA-F]+);/g, function (m, h) { return String.fromCharCode(parseInt(h, 16)); });
 }
 
 function stripTags(s) {
@@ -92,11 +90,12 @@ function stripTags(s) {
 }
 
 function attr(tag, name) {
-  var m = new RegExp(name.replace(/[.*+?^${}()|[<LB>]<RB>]\]/g, '\\$&') + '\\s*=\\s*["\']([^"\']*)["\']', 'i').exec(tag);
+  var re = new RegExp(name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '\\s*=\\s*["\']([^"\']*)["\']', 'i');
+  var m = re.exec(tag);
   return m ? decodeEntities(m[1]) : '';
 }
 
-/** Turkce karakterleri ASCII'ye katlar. */
+/** Turkce karakterleri ASCII'ye katlar (eslestirme icin). */
 function asciiFold(s) {
   var map = {
     'ı': 'i', 'İ': 'i', 'ş': 's', 'Ş': 's', 'ğ': 'g', 'Ğ': 'g',
@@ -157,13 +156,16 @@ function hostOf(u) {
   return m ? m[1] : null;
 }
 
-/** Guvenli response header okuma (fetch polyfill farklari icin). */
+function siteBase() {
+  return activeHost === 'origin' ? ORIGIN_URL : BASE_URL;
+}
+
 function getHeader(res, name) {
   try {
     if (res && res.headers && typeof res.headers.get === 'function') {
       return res.headers.get(name);
     }
-  } catch (e) { /* yoksay */ }
+  } catch (e) { /* polyfill farklari: yoksay */ }
   return null;
 }
 
@@ -214,7 +216,7 @@ function b64DecodeUtf8(s) {
 // --- JSON yardimcilari ---------------------------------------------------
 
 /** HTML icindeki application/ld+json bloklarini ayristirir. */
-function ldJson(html) {
+function ldJsonBlocks(html) {
   var out = [];
   var re = /<script[^>]*type=["']application\/ld\+json["'][^>]*>([\s\S]*?)<\/script>/gi;
   var m;
@@ -239,11 +241,12 @@ function isCloudflareChallenge(status, body) {
 }
 
 /**
- * Cekirdek istek. 5xx ve ag hatalarinda artan beklemeyle 3 deneme yapar.
- * opts: {method, headers, body, accept, referer, contentType, xrw, noLang, retries}
+ * Cekirdek istek. 5xx ve ag hatalarinda artan beklemeyle yeniden dener.
+ * opts: {method, headers, body, accept, referer, contentType, xrw, noLang, retries, siteOnly}
  */
 function httpReq(url, opts) {
   opts = opts || {};
+  var isSite = url.indexOf('cizgimax.online') !== -1;
   var headers = {
     'User-Agent': USER_AGENT,
     'Accept': opts.accept || 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
@@ -256,6 +259,7 @@ function httpReq(url, opts) {
   }
   if (opts.xrw) headers['X-Requested-With'] = 'XMLHttpRequest';
   if (opts.contentType) headers['Content-Type'] = opts.contentType;
+  if (isSite && activeHost === 'origin') headers['X-Forwarded-Host'] = 'cizgimax.online';
   if (opts.headers) {
     for (var hk in opts.headers) {
       if (typeof opts.headers[hk] !== 'undefined') headers[hk] = opts.headers[hk];
@@ -295,30 +299,19 @@ function httpReq(url, opts) {
 }
 
 /**
- * Site sayfasi GET. CF challenge donerse (canonical) origin sunucusuna gecer ve
- * "X-Forwarded-Host: cizgimax.online" basligiyle tekrar dener. Donus: {status, text}.
+ * Site sayfasi GET. CF challenge donerse (canonical) origin sunucusuna gecer:
+ * yeniden denemede URL origin uzerinden kurulur ve httpReq X-Forwarded-Host ekler.
  * opts: {accept, method, body, contentType, headers, referer}
  */
 function siteGet(path, opts) {
   opts = opts || {};
-  function attempt(base) {
-    var url = /^https?:\/\//i.test(path) ? path : base + path;
-    var headers = {};
-    if (base === ORIGIN_URL) headers['X-Forwarded-Host'] = 'cizgimax.online';
-    if (opts.headers) {
-      for (var k in opts.headers) headers[k] = opts.headers[k];
-    }
-    return httpReq(url, {
-      method: opts.method || 'GET',
-      body: opts.body,
-      contentType: opts.contentType,
-      accept: opts.accept,
-      headers: headers,
-      xrw: opts.xrw !== false,
-    }).then(function (res) {
-      if (isCloudflareChallenge(res.status, res.text) && base !== ORIGIN_URL) {
+  function attempt() {
+    var url = /^https?:\/\//i.test(path) ? path : siteBase() + path;
+    return httpReq(url, opts).then(function (res) {
+      if (isCloudflareChallenge(res.status, res.text) && activeHost !== 'origin' &&
+          url.indexOf(ORIGIN_URL) !== 0) {
         activeHost = 'origin';
-        return attempt(ORIGIN_URL).then(function (res2) {
+        return attempt().then(function (res2) {
           if (res2.status < 400 && !isCloudflareChallenge(res2.status, res2.text)) return res2;
           activeHost = null;
           return res2;
@@ -327,7 +320,7 @@ function siteGet(path, opts) {
       return res;
     });
   }
-  return attempt(siteBase());
+  return attempt();
 }
 
 /** Basarili HTTP bekleyen site GET; donus: sayfa metni. */
@@ -342,16 +335,13 @@ function siteGetText(path, what, opts) {
   });
 }
 
-/** Harici host GET (TMDB / Cinemeta / sibnet / dzen). Donus: sayfa metni. */
+/** Harici host GET (TMDB / Cinemeta / dzen / sibnet). Donus: {status, text}. */
 function externalGet(url, opts) {
   return httpReq(url, {
     accept: (opts && opts.accept) || 'application/json, text/plain, */*',
     referer: (opts && typeof opts.referer === 'string') ? opts.referer : undefined,
     noLang: opts && opts.noLang,
     retries: (opts && opts.retries) || 2,
-  }).then(function (res) {
-    if (res.status >= 400) throw new Error('HTTP ' + res.status + ': ' + url);
-    return res.text;
   });
 }
 
@@ -428,7 +418,13 @@ function absUrl(u, base) {
   u = String(u);
   if (/^https?:\/\//i.test(u)) return u;
   if (u.indexOf('//') === 0) return 'https:' + u;
-  return resolveUrl(u, base || siteBase());
+  var b = String(base || siteBase());
+  if (u.indexOf('/') === 0) {
+    // kok goreli: taban bir sayfa URL'si olsa bile origin uzerinden coz
+    var om = b.match(/^https?:\/\/[^\/]+/);
+    return (om ? om[0] : b.replace(/\/$/, '')) + u;
+  }
+  return b.replace(/\/$/, '') + '/' + u;
 }
 
 // ==========================================================================================
@@ -493,7 +489,7 @@ function parseSuggest(json) {
 /** Dizi detay sayfasi: JSON-LD + kunye + sezon/bolum listesi. */
 function parseSeries(html, url) {
   var ld = null;
-  var lds = ldJson(html);
+  var lds = ldJsonBlocks(html);
   for (var q = 0; q < lds.length; q++) {
     if (lds[q] && lds[q]['@type'] && /TVSeries|Movie/i.test(String(lds[q]['@type']))) { ld = lds[q]; break; }
   }
@@ -526,29 +522,29 @@ function parseSeries(html, url) {
       var label = stripTags(labelM ? labelM[1] : '');
       var num = parseInt(label, 10);
       if (isNaN(num)) num = episodes.length + 1;
-      // bolum URL'i: /<slug>-<n>-sezon-<m>-bolum-izle/
       var um = am.href.match(/-([0-9]+)-sezon-([0-9]+)-bolum/);
       episodes.push({
         season: um ? parseInt(um[1], 10) : paneIdx[i].season,
         number: um ? parseInt(um[2], 10) : num,
         title: attr(am.tag, 'title') || null,
+        epId: attr(am.tag, 'data-ep-id') || null,
         url: absUrl(am.href, url),
       });
     }
   }
 
   var ogImage = /<meta[^>]*property=["']og:image["'][^>]*content=["']([^"']+)["']/i.exec(html);
-  var poster = ogImage ? absUrl(attr(ogImage[0], 'content'), url) : null;
   var h1 = /<h1[^>]*>([\s\S]*?)<\/h1>/i.exec(html);
   var descBlock = firstByClass(html, 'anime-desc');
 
   return {
     title: ld.name || (h1 ? stripTags(h1[1]) : ''),
+    alternateName: ld.alternateName || null,
     description: ld.description || (descBlock ? stripTags(descBlock) : ''),
     year: yearOf(ld.datePublished) || yearOf(kv['Yayın Yılı']),
     seasons: seasons,
     episodes: episodes,
-    poster: poster,
+    poster: ogImage ? absUrl(attr(ogImage[0], 'content'), url) : null,
     url: url || null,
   };
 }
@@ -568,7 +564,7 @@ function parseServers(html) {
 /** Bolum detay sayfasi: JSON-LD + servers + csrf token. */
 function parseEpisode(html, url) {
   var ld = null;
-  var lds = ldJson(html);
+  var lds = ldJsonBlocks(html);
   for (var q = 0; q < lds.length; q++) {
     if (lds[q] && lds[q]['@type'] && /TVEpisode/i.test(String(lds[q]['@type']))) { ld = lds[q]; break; }
   }
@@ -582,6 +578,7 @@ function parseEpisode(html, url) {
   return {
     title: ld.name || (titleM ? stripTags(titleM[1]) : ''),
     series: ld.partOfSeries && ld.partOfSeries.name ? ld.partOfSeries.name : null,
+    seriesUrl: ld.partOfSeries && ld.partOfSeries.url ? absUrl(ld.partOfSeries.url, url) : null,
     season: typeof ld.seasonNumber !== 'undefined' ? ld.seasonNumber : null,
     episode: typeof ld.episodeNumber !== 'undefined' ? ld.episodeNumber : null,
     description: ld.description || (descM ? decodeEntities(descM[1]) : ''),
@@ -593,208 +590,32 @@ function parseEpisode(html, url) {
 }
 
 // ==========================================================================================
-// 5) TMDB / Cinemeta eslestirme (diger eklentilerle ayni yaklasim)
+// 5) OYNATICI COZUMLEME
 // ==========================================================================================
 
-function fetchTmdbMeta(id, mediaType) {
-  var kind = mediaType === 'movie' ? 'movie' : 'tv';
-  var url = TMDB_BASE_URL + '/' + kind + '/' + id + '?api_key=' + TMDB_API_KEY + '&language=tr-TR';
-  return externalGet(url).then(function (body) {
-    var data = jsonLoose(body);
-    if (!data) throw new Error('TMDB meta JSON bozuk (id: ' + id + ')');
-    return {
-      names: [data.original_name || data.original_title, data.name || data.title],
-      year: yearOf(data.first_air_date || data.release_date),
-      kind: kind,
-    };
-  });
-}
-
-function fetchCinemetaMeta(imdbId) {
-  return externalGet(CINEMETA_URL + 'series/' + imdbId + '.json').then(function (body) {
-    var meta = (jsonLoose(body) || {}).meta || {};
-    return { names: [meta.name, meta.originalName], year: yearOf(meta.released), kind: 'tv' };
-  }).catch(function () {
-    return externalGet(CINEMETA_URL + 'movie/' + imdbId + '.json').then(function (body) {
-      var meta = (jsonLoose(body) || {}).meta || {};
-      return { names: [meta.name, meta.originalName], year: yearOf(meta.released), kind: 'movie' };
-    });
-  });
-}
-
-/** CizgiMax'ta tum icerikler /diziler/ altindadir; bolum sayfasi ise -bolum-izle icerir. */
-function urlKind(url) {
-  url = String(url || '');
-  if (/-bolum-izle\/?$/i.test(url) || /-bolum-izle\//.test(url)) return 'episode';
-  if (/\/diziler\//.test(url)) return 'series';
-  return '';
-}
-
-function pickBestItem(items, names, year, wantKind) {
-  var best = null;
-  var bestScore = -1;
-  for (var i = 0; i < items.length; i++) {
-    var item = items[i];
-    var a = normalizeTitle(item.title);
-    if (!a) continue;
-    var nameScore = 0;
-    for (var n = 0; n < names.length; n++) {
-      var b = normalizeTitle(names[n]);
-      if (!b) continue;
-      if (a === b) nameScore = Math.max(nameScore, 100);
-      else if (a.indexOf(b) !== -1 || b.indexOf(a) !== -1) nameScore = Math.max(nameScore, 80);
-      else if (diceSimilarity(a, b) >= 0.7) nameScore = Math.max(nameScore, 70);
+/** Yanit govdesinden ilk video URL'sini cikarir (JSON / duz metin). */
+function extractVideoUrl(text, json) {
+  if (json && typeof json === 'object') {
+    var keys = ['url', 'src', 'file', 'link', 'mp4', 'm3u8', 'stream', 'video_url', 'source'];
+    for (var i = 0; i < keys.length; i++) {
+      var v = json[keys[i]];
+      if (typeof v === 'string' && /^https?:\/\//i.test(v)) return v;
     }
-    if (nameScore === 0) continue;
-    var score = nameScore;
-    var itemKind = urlKind(item.url);
-    if (wantKind === 'movie' && itemKind === 'episode') score -= 10;
-    if (wantKind === 'series' && itemKind === 'episode') score -= 10;
-    if (itemKind === 'series') score += 5;
-    var cardYear = parseInt(item.year, 10);
-    if (!isNaN(cardYear) && year) {
-      if (cardYear === year) score += 20;
-      else if (Math.abs(cardYear - year) <= 1) score += 10;
-    }
-    if (score > bestScore) { bestScore = score; best = item; }
-  }
-  return bestScore >= 70 ? best : null;
-}
-
-// ==========================================================================================
-// 6) Site aramasi (suggest API -> HTML yedek; asciiFold katlama ile)
-// ==========================================================================================
-
-/** Canli arama onerileri: /api/search/suggest/?q= */
-function searchSuggest(q) {
-  return siteGetText('/api/search/suggest/?q=' + encodeURIComponent(q), 'arama onerileri', {
-    accept: 'application/json, text/plain, */*',
-  }).then(function (text) {
-    var data = jsonLoose(text);
-    return parseSuggest(data);
-  }).catch(function () {
-    return [];
-  });
-}
-
-/** HTML arama yedegi: /ara/?q= (film-item kartlari). */
-function searchHtml(q) {
-  return siteGetText('/ara/?q=' + encodeURIComponent(q), 'arama sayfasi').then(function (html) {
-    var cards = parseCards(html);
-    var out = [];
-    for (var i = 0; i < cards.length; i++) {
-      var c = cards[i];
-      var u = c.seriesUrl || c.url;
-      if (!u) continue;
-      out.push({ id: c.id, title: c.title, url: u, poster: c.poster, year: c.year });
-    }
-    return out;
-  }).catch(function () {
-    return [];
-  });
-}
-
-/** Iki kaynagi birlestirir (URL bazli tekillestirme). */
-function mergeResults(listA, listB) {
-  var seen = {};
-  var out = [];
-  var lists = [listA, listB];
-  for (var l = 0; l < lists.length; l++) {
-    for (var i = 0; i < lists[l].length; i++) {
-      var it = lists[l][i];
-      if (!it || !it.url || !it.title) continue;
-      if (seen[it.url]) continue;
-      seen[it.url] = true;
-      out.push(it);
-    }
-  }
-  return out;
-}
-
-function searchSite(query) {
-  return searchSuggest(query).then(function (suggestItems) {
-    return searchHtml(query).then(function (htmlItems) {
-      return mergeResults(suggestItems, htmlItems);
-    });
-  });
-}
-
-/** TMDB/Cinemeta id'sini site kartina esler. Donus: {id,title,url,year,poster}. */
-function resolveSiteCard(id, mediaType) {
-  var metaTask = (typeof id === 'string' && id.indexOf('tt') === 0)
-    ? fetchCinemetaMeta(id)
-    : fetchTmdbMeta(id, mediaType);
-
-  return metaTask.then(function (meta) {
-    var names = [];
-    for (var i = 0; i < meta.names.length; i++) {
-      if (meta.names[i]) names.push(meta.names[i]);
-    }
-    if (!names.length) throw new Error('Baslik adi bulunamadi (id: ' + id + ')');
-
-    var wantKind = mediaType === 'movie' ? 'movie' : 'series';
-    var tryIndex = 0;
-    function tryNext() {
-      if (tryIndex >= names.length) {
-        return searchSite(names[0]).then(function (items) {
-          var fallback = pickBestItem(items, names, meta.year, wantKind);
-          if (!fallback) throw new Error('CizgiMax uzerinde bulunamadi: ' + names.join(' / '));
-          return fallback;
-        });
+    for (var k in json) {
+      if (Object.prototype.hasOwnProperty.call(json, k)) {
+        var v2 = json[k];
+        if (typeof v2 === 'string' && /\.(m3u8|mp4)(\?|$)/i.test(v2)) return v2;
       }
-      var query = names[tryIndex++];
-      return searchSite(query).then(function (items) {
-        var match = pickBestItem(items, names, meta.year, wantKind);
-        if (match) return match;
-        return tryNext();
-      });
     }
-    return tryNext();
-  });
-}
-
-// ==========================================================================================
-// 7) OYNATICI COZUMLEME
-// ==========================================================================================
-
-/** JSON nesnesinden ilk video URL'sini cikarir. */
-function extractVideoUrlFromJson(json) {
-  if (!json || typeof json !== 'object') return null;
-  var keys = ['url', 'src', 'file', 'link', 'mp4', 'm3u8', 'stream', 'video_url', 'source'];
-  for (var i = 0; i < keys.length; i++) {
-    var v = json[keys[i]];
-    if (typeof v === 'string' && /^https?:\/\//i.test(v)) return v;
   }
-  for (var k in json) {
-    if (Object.prototype.hasOwnProperty.call(json, k)) {
-      var v2 = json[k];
-      if (typeof v2 === 'string' && /\.(m3u8|mp4)(\?|$)/i.test(v2)) return v2;
-    }
+  if (typeof text === 'string') {
+    var m = text.match(/https?:\/\/[^\s"'<>\\]+?\.(?:m3u8|mp4|mpd)(?:\?[^\s"'<>\\]*)?/i);
+    if (m) return m[0];
   }
   return null;
 }
 
-/** Duz metinden ilk m3u8/mp4/mpd adresini bulur. */
-function extractFirstMediaUrl(text) {
-  var m = /https?:\/\/[^\s"'<>\\]+?\.(?:m3u8|mp4|mpd)(?:\?[^\s"'<>\\]*)?/i.exec(String(text || ''));
-  return m ? m[0] : null;
-}
-
-/** Metindeki tum medya URL'lerini (tekillenmis) dondurur. */
-function extractMediaUrlList(text, limit) {
-  var out = [];
-  var seen = {};
-  var re = /https?:\/\/[^\s"'<>\\]+?\.(?:m3u8|mp4|mpd)(?:\?[^\s"'<>\\]*)?/gi;
-  var m;
-  while ((m = re.exec(text)) !== null && out.length < (limit || 10)) {
-    if (seen[m[0]]) continue;
-    seen[m[0]] = true;
-    out.push(m[0]);
-  }
-  return out;
-}
-
-/** Dzen embed sayfasindan HLS/DASH + kalite listesi cikarir. */
+/** Dzen embed sayfasindan HLS/DASH + kalite kaynaklarini cikarir. */
 function dzenPageSources(html) {
   var urls = [];
   function scan(text) {
@@ -823,38 +644,23 @@ function dzenPageSources(html) {
   return { ok: sources.length > 0, provider: 'dzen.ru', sources: sources };
 }
 
-/** Sibnet shell oynatici sayfasindan video URL'si cikarir. */
+/** Sibnet shell oynatici sayfasindan video URL'sini cikarir. */
 function sibnetShellSources(html) {
   var found = [];
   var re = /https?:\/\/[^\s"'<>\\]+?\.(?:m3u8|mp4)(?:\?[^\s"'<>\\]*)?/gi;
   var m;
   while ((m = re.exec(html)) !== null && found.length < 6) {
-    found.push({
-      label: 'Sibnet',
-      type: /\.m3u8/i.test(m[0]) ? 'm3u8' : 'mp4',
-      url: m[0],
-      quality: 'auto',
-    });
+    found.push({ label: 'Sibnet', type: /\.m3u8/i.test(m[0]) ? 'm3u8' : 'mp4', url: m[0], quality: 'auto' });
   }
   var vu = /["']?(?:videoUrl|video_url|file|src)["']?\s*[:=]\s*["'](https?:\/\/[^"']+)["']/i.exec(html);
   if (vu) {
-    found.unshift({
-      label: 'Sibnet',
-      type: /\.m3u8/i.test(vu[1]) ? 'm3u8' : 'mp4',
-      url: vu[1],
-      quality: 'auto',
-    });
+    found.unshift({ label: 'Sibnet', type: /\.m3u8/i.test(vu[1]) ? 'm3u8' : 'mp4', url: vu[1], quality: 'auto' });
   }
   var j = jsonLoose(html);
   if (j) {
-    var ju = extractVideoUrlFromJson(j);
+    var ju = extractVideoUrl(html, j);
     if (ju) {
-      found.unshift({
-        label: 'Sibnet',
-        type: /\.m3u8/i.test(ju) ? 'm3u8' : 'mp4',
-        url: ju,
-        quality: 'auto',
-      });
+      found.unshift({ label: 'Sibnet', type: /\.m3u8/i.test(ju) ? 'm3u8' : 'mp4', url: ju, quality: 'auto' });
     }
   }
   return { ok: found.length > 0, provider: 'video.sibnet.ru', sources: found };
@@ -862,101 +668,71 @@ function sibnetShellSources(html) {
 
 /** Genel embed sayfasindan medya URL'lerini tarar. */
 function genericSources(html) {
-  var urls = extractMediaUrlList(html, 10);
-  var sources = [];
-  for (var i = 0; i < urls.length; i++) {
-    sources.push({
+  var found = [];
+  var seen = {};
+  var re = /https?:\/\/[^\s"'<>\\]+?\.(?:m3u8|mpd|mp4)(?:\?[^\s"'<>\\]*)?/gi;
+  var m;
+  while ((m = re.exec(html)) !== null && found.length < 10) {
+    if (seen[m[0]]) continue;
+    seen[m[0]] = true;
+    found.push({
       label: 'Embed',
-      type: /\.m3u8/i.test(urls[i]) ? 'm3u8' : (/\.mpd/i.test(urls[i]) ? 'mpd' : 'mp4'),
-      url: urls[i],
+      type: /\.m3u8/i.test(m[0]) ? 'm3u8' : (/\.mpd/i.test(m[0]) ? 'mpd' : 'mp4'),
+      url: m[0],
       quality: 'auto',
     });
   }
-  return { ok: sources.length > 0, provider: 'embed', sources: sources };
+  return { ok: found.length > 0, provider: 'embed', sources: found };
 }
 
-/** Embed URL'ini ceker ve govdeye gore dzen/sibnet/genel olarak cozer. */
-function resolveEmbedUrl(embedUrl, depth) {
-  var d = depth || 0;
-  var isDzen = /dzen\.ru/i.test(embedUrl);
-  var isSibnet = /sibnet/i.test(embedUrl);
-  var referer = isDzen ? DZEN_REFERER : (isSibnet ? SIBNET_REFERER : SITE_REFERER);
-  return httpReq(embedUrl, {
-    referer: referer,
-    accept: 'text/html,application/xhtml+xml,*/*',
-    retries: 2,
-  }).then(function (r) {
-    if (r.status >= 400) {
-      return { ok: false, provider: hostOf(embedUrl), error: 'HTTP ' + r.status + ' (embed)' };
-    }
-    var result = resolveEmbedBody(embedUrl, r.text || '', d);
-    if (!result) {
-      result = { ok: false, provider: hostOf(embedUrl), error: 'Embed icerigi cozulemedi' };
-    }
-    result.embed = embedUrl;
-    return result;
-  }).catch(function (err) {
-    return { ok: false, provider: hostOf(embedUrl), error: String(err && err.message ? err.message : err) };
-  });
-}
-
-/** Sayfa govdesini saglayiciya gore siniflandirip cozer. */
-function resolveEmbedBody(embedUrl, html, depth) {
-  html = html || '';
-  if (!html) return null;
-  var d = depth || 0;
-
-  // Dzen embed sayfasi
-  if (/dzen\.ru/i.test(embedUrl) || /dzen\.ru\/embed/i.test(html) || /"url":\s*"https:\/\/vd/i.test(html)) {
-    var dz = dzenPageSources(html);
-    if (dz.ok) { dz.provider = 'dzen.ru'; return dz; }
-  }
-  // Sibnet shell oynatıcı
-  if (/video\.sibnet\.ru|shell\.php|videoid=/i.test(embedUrl) || /video\.sibnet\.ru|shell\.php/i.test(html)) {
-    var sb = sibnetShellSources(html);
-    if (sb.ok) { sb.provider = 'video.sibnet.ru'; return sb; }
-  }
-  // Gomulu iframe (farkli host ise ic ice bir kez daha dene)
-  var im = /<iframe[^>]*src="(https?:\/\/[^"]+)"/i.exec(html);
-  if (im && d < 2) {
-    var inner = decodeEntities(im[1]);
-    var innerHost = hostOf(inner);
-    var outerHost = hostOf(embedUrl);
-    if (!outerHost || !innerHost || innerHost !== outerHost) {
-      return resolveEmbedUrl(inner, d + 1);
-    }
-  }
-  return genericSources(html);
-}
-
-/** iframe tipi: /oynat/?t= -> 302 (veya takip edilen embed sayfasi) -> cozumle. */
-function resolveIframeServer(srv) {
-  return siteGet(srv.src, { accept: 'text/html,application/xhtml+xml,*/*' }).then(function (res) {
-    var embed = (res.location && /^https?:\/\//i.test(res.location)) ? res.location : null;
-    var body = res.text || '';
-    if (!embed) {
-      var im = /<iframe[^>]*src="(https?:\/\/[^"]+)"/i.exec(body);
-      if (im) embed = decodeEntities(im[1]);
-    }
-    if (!embed) {
-      // Yonlendirme takip edildi: govdeyi dogrudan siniflandir
-      var byBody = resolveEmbedBody('', body, 0);
-      if (byBody && byBody.ok) {
-        byBody.label = srv.label;
-        return byBody;
-      }
-      return { ok: false, provider: 'iframe', label: srv.label, error: 'Embed yonlendirmesi alinamadi' };
-    }
-    return resolveEmbedUrl(embed, 0).then(function (r) {
-      r.label = srv.label;
-      return r;
+/** Dzen embed sayfasini cozer. */
+function resolveDzenEmbed(embedUrl) {
+  return httpReq(embedUrl, { referer: DZEN_REFERER, accept: 'text/html,application/xhtml+xml,*/*', retries: 1 })
+    .then(function (r) {
+      if (!r.ok) return { ok: false, provider: 'dzen.ru', error: 'HTTP ' + r.status };
+      var d = dzenPageSources(r.text || '');
+      d.embed = embedUrl;
+      return d;
+    })
+    .catch(function (err) {
+      return { ok: false, provider: 'dzen.ru', error: String(err && err.message ? err.message : err) };
     });
-  }).catch(function (err) {
-    return { ok: false, provider: 'iframe', label: srv.label, error: String(err && err.message ? err.message : err) };
-  });
 }
 
-/** Sibnet site API'si -> yedek: sibnet embed dogrudan. */
+/**
+ * video.sibnet.ru shell oynaticisini cozer: api/video/<id>, api/video?videoid=,
+ * shell.php?videoid= ve embed URL'si sirayla denenir.
+ */
+function resolveSibnetShell(embedUrl) {
+  var vidM = /[?&]videoid=(\d+)/i.exec(embedUrl);
+  var vid = vidM ? vidM[1] : null;
+  var tries = [];
+  if (vid) {
+    tries.push('https://video.sibnet.ru/api/video/' + vid);
+    tries.push('https://video.sibnet.ru/api/video?videoid=' + vid);
+    tries.push('https://video.sibnet.ru/shell.php?videoid=' + vid);
+  }
+  tries.push(embedUrl);
+  var chain = Promise.resolve({ ok: false, provider: 'video.sibnet.ru', error: 'sibnet shell cozumlenemedi' });
+  for (var i = 0; i < tries.length; i++) {
+    (function (u) {
+      chain = chain.then(function (prev) {
+        if (prev && prev.ok) return prev;
+        return httpReq(u, { referer: SIBNET_REFERER, accept: '*/*', noLang: true, retries: 1 })
+          .then(function (r) {
+            if (!r.ok) return prev;
+            var s = sibnetShellSources(r.text || '');
+            if (s.ok) { s.embed = u; return s; }
+            return prev;
+          })
+          .catch(function () { return prev; });
+      });
+    })(tries[i]);
+  }
+  return chain;
+}
+
+/** sibnet embed sayfasindan dogrudan video URL'si cikarir. */
 function resolveSibnetEmbed(embedId) {
   if (!embedId) return Promise.resolve({ ok: false, provider: 'video.sibnet.ru', error: 'embedId yok' });
   var urls = [
@@ -968,61 +744,88 @@ function resolveSibnetEmbed(embedId) {
     (function (u) {
       chain = chain.then(function (prev) {
         if (prev && prev.ok) return prev;
-        return httpReq(u, { referer: SIBNET_REFERER, accept: 'text/html,*/*', retries: 1 }).then(function (r) {
-          if (r.status >= 400) return prev;
-          var s = sibnetShellSources(r.text || '');
-          if (s.ok) { s.embed = u; return s; }
-          return prev;
-        }).catch(function () { return prev; });
+        return httpReq(u, { referer: 'https://sibnet.ru/', accept: 'text/html,*/*', retries: 1 })
+          .then(function (r) {
+            if (!r.ok) return prev;
+            var s = sibnetShellSources(r.text || '');
+            if (s.ok) { s.embed = u; return s; }
+            return prev;
+          })
+          .catch(function () { return prev; });
       });
     })(urls[i]);
   }
   return chain;
 }
 
-function resolveSibnetShell(embedUrl) {
-  var vidM = /[?&]videoid=(\d+)/i.exec(embedUrl);
-  var tries = [];
-  if (vidM) {
-    tries.push('https://video.sibnet.ru/api/video/' + vidM[1]);
-    tries.push('https://video.sibnet.ru/api/video?videoid=' + vidM[1]);
-    tries.push('https://video.sibnet.ru/shell.php?videoid=' + vidM[1]);
-  }
-  tries.push(embedUrl);
-  var chain = Promise.resolve({ ok: false, provider: 'video.sibnet.ru', error: 'sibnet shell cozumlenemedi' });
-  for (var i = 0; i < tries.length; i++) {
-    (function (u) {
-      chain = chain.then(function (prev) {
-        if (prev && prev.ok) return prev;
-        return httpReq(u, { referer: SIBNET_REFERER, accept: '*/*', noLang: true, retries: 1 }).then(function (r) {
-          if (r.status >= 400) return prev;
-          var s = sibnetShellSources(r.text || '');
-          if (s.ok) { s.embed = u; return s; }
-          return prev;
-        }).catch(function () { return prev; });
-      });
-    })(tries[i]);
-  }
-  return chain;
+/** Embed URL'ini saglayiciya gore cozer (dzen / sibnet / genel). */
+function resolveEmbedPage(embedUrl) {
+  if (/dzen\.ru\/embed\//i.test(embedUrl)) return resolveDzenEmbed(embedUrl);
+  if (/video\.sibnet\.ru/i.test(embedUrl)) return resolveSibnetShell(embedUrl);
+  return httpReq(embedUrl, { accept: 'text/html,application/xhtml+xml,*/*', retries: 1 })
+    .then(function (r) {
+      if (!r.ok) return { ok: false, provider: hostOf(embedUrl), error: 'HTTP ' + r.status + ' (embed)' };
+      return genericSources(r.text || '');
+    })
+    .catch(function (err) {
+      return { ok: false, provider: hostOf(embedUrl), error: String(err && err.message ? err.message : err) };
+    });
 }
 
+/** iframe tipi: /oynat/?t= -> 302 -> provider embed -> cozumle. */
+function resolveIframeServer(srv) {
+  return siteGet(srv.src, { accept: 'text/html,application/xhtml+xml,*/*' }).then(function (res) {
+    // 1) 302 Location (redirect:'manual' destekleyen ortamlarda)
+    if (res.location && /^https?:\/\//i.test(res.location)) {
+      return resolveEmbedPage(res.location).then(function (r) {
+        r.label = srv.label;
+        return r;
+      });
+    }
+    var body = res.text || '';
+    // 2) Yonlendirme takip edildiyse govde zaten embed sayfasidir
+    //    (yalnizca kaynak cikarilabilirse kullan; aksi halde iframe arastir)
+    if (/"url":\s*"https:\/\/vd|dzen\.ru\/embed/i.test(body)) {
+      var d = dzenPageSources(body);
+      if (d.ok) { d.label = srv.label; return d; }
+    }
+    if (/video\.sibnet\.ru|shell\.php|videoid=/i.test(body)) {
+      var s = sibnetShellSources(body);
+      if (s.ok) { s.label = srv.label; return s; }
+    }
+    // 3) Govdede gomulu iframe arastir
+    var im = /<iframe[^>]*src="(https?:\/\/[^"]+)"/i.exec(body);
+    if (im) {
+      return resolveEmbedPage(decodeEntities(im[1])).then(function (r) {
+        r.label = srv.label;
+        return r;
+      });
+    }
+    // 4) Genel tarama
+    var g = genericSources(body);
+    g.label = srv.label;
+    return g;
+  }).catch(function (err) {
+    return { ok: false, provider: 'iframe', label: srv.label, error: String(err && err.message ? err.message : err) };
+  });
+}
+
+/**
+ * Sibnet: once sitenin kendi cozumleme API'si, olmazsa client-side embed cozumleme.
+ */
 function resolveSibnetServer(srv) {
   return siteGet(srv.streamUrl, { accept: 'application/json, text/plain, */*' }).then(function (res) {
     if (res.location && /^https?:\/\//i.test(res.location)) {
       return {
-        ok: true,
-        provider: 'sibnet',
-        label: srv.label,
+        ok: true, provider: 'sibnet', label: srv.label,
         sources: [{ label: 'Sibnet', type: /\.m3u8/i.test(res.location) ? 'm3u8' : 'mp4', url: res.location, quality: 'auto' }],
       };
     }
     var data = jsonLoose(res.text || '');
-    var url = data ? extractVideoUrlFromJson(data) : extractFirstMediaUrl(res.text);
+    var url = extractVideoUrl(res.text, data);
     if (url) {
       return {
-        ok: true,
-        provider: 'sibnet',
-        label: srv.label,
+        ok: true, provider: 'sibnet', label: srv.label,
         sources: [{ label: 'Sibnet', type: /\.m3u8/i.test(url) ? 'm3u8' : 'mp4', url: url, quality: 'auto' }],
       };
     }
@@ -1042,20 +845,21 @@ function resolveSibnetServer(srv) {
   });
 }
 
-/** np (native): /api/np-resolve/?t= -> {id} -> tau-video upstream -> (opsiyonel imza). */
+/** np (native): /api/np-resolve/?t= -> {id} -> upstream API -> urls[] -> (opsiyonel imza). */
 function resolveNpServer(srv, csrf) {
   return siteGetText(srv.resolveUrl, 'np-resolve', { accept: 'application/json' }).then(function (text) {
-    var data = jsonLoose(text);
-    var id = data && data.id;
+    var resData = jsonLoose(text);
+    var id = (resData && resData.id) || null;
     if (!id) throw new Error('np-resolve id yok');
 
     return httpReq(NP_API_URL + encodeURIComponent(String(id)), {
-      referer: '',
       accept: 'application/json, text/plain, */*',
       noLang: true,
+      referer: '',
+      headers: { 'Origin': 'null' },
       retries: 2,
     }).then(function (up) {
-      var upstream = up.ok ? jsonLoose(up.text) : null;
+      var upstream = up.ok ? jsonLoose(up.text || '') : null;
       var urls = [];
       var captions = [];
       if (upstream) {
@@ -1067,7 +871,7 @@ function resolveNpServer(srv, csrf) {
         captions = upstream.captions || [];
       }
 
-      // Sunucu tarafi imzalama: upstream URL'leri /api/stream/dzen/?s=... yapar
+      // Sunucu tarafi imzalama: upstream URL'leri /api/stream/dzen/?s=... olur
       var signTask;
       if (csrf && urls.length) {
         var tokenM = String(srv.resolveUrl).match(/[?&]t=([^&]+)/);
@@ -1080,7 +884,7 @@ function resolveNpServer(srv, csrf) {
           headers: { 'X-CSRF-Token': csrf },
           body: JSON.stringify({ token: tokenM ? tokenM[1] : '', urls: signUrls, captions: captions }),
         }).then(function (sres) {
-          var sdata = sres.status < 400 ? jsonLoose(sres.text) : null;
+          var sdata = sres.status < 400 ? jsonLoose(sres.text || '') : null;
           if (sdata && sdata.signed) {
             var map = {};
             for (var k = 0; k < sdata.signed.length; k++) {
@@ -1122,14 +926,16 @@ function resolveNpServer(srv, csrf) {
         return { ok: true, provider: 'np', label: srv.label, sources: sources, subtitles: subs };
       });
     });
+  }).catch(function (err) {
+    return { ok: false, provider: 'np', label: srv.label, error: String(err && err.message ? err.message : err) };
   });
 }
 
 /** hdfc: meta endpoint -> {hls, subtitles}. */
 function resolveMetaServer(srv) {
-  return siteGetText(srv.metaUrl, 'hdfc meta', { accept: 'application/json' }).then(function (text) {
-    var j = jsonLoose(text);
-    if (!j) throw new Error('meta JSON yok');
+  return siteGet(srv.metaUrl, { accept: 'application/json' }).then(function (res) {
+    var j = jsonLoose(res.text || '');
+    if (!j) return { ok: false, provider: 'hdfc', label: srv.label, error: 'meta JSON yok' };
     var sources = [];
     if (j.hls || j.url || j.m3u8) {
       sources.push({ label: 'HLS', type: 'm3u8', url: j.hls || j.url || j.m3u8, quality: 'auto' });
@@ -1151,6 +957,8 @@ function resolveMetaServer(srv) {
       }
     }
     return { ok: sources.length > 0, provider: 'hdfc', label: srv.label, sources: sources, subtitles: subs };
+  }).catch(function (err) {
+    return { ok: false, provider: 'hdfc', label: srv.label, error: String(err && err.message ? err.message : err) };
   });
 }
 
@@ -1161,7 +969,6 @@ function resolveOneServer(srv, ep) {
   if (srv.type === 'iframe' && srv.src) return resolveIframeServer(srv);
   if (srv.resolveUrl) return resolveNpServer(srv, ep && ep.csrf);
   if (srv.metaUrl) return resolveMetaServer(srv);
-  if (srv.src) return resolveEmbedUrl(srv.src, 0).then(function (r) { r.label = srv.label; return r; });
   return Promise.resolve({ ok: false, error: 'Desteklenmeyen tip: ' + srv.type, label: srv.label });
 }
 
@@ -1175,9 +982,10 @@ function resolveEpisodeServers(ep) {
       chain = chain.then(function () {
         return resolveOneServer(srv, ep).then(function (r) {
           if (!r.label) r.label = srv.label;
+          r.srvHint = srv;
           out.push(r);
         }, function (e) {
-          out.push({ ok: false, label: srv.label, error: String(e && e.message ? e.message : e) });
+          out.push({ ok: false, label: srv.label, srvHint: srv, error: String(e && e.message ? e.message : e) });
         });
       });
     })(servers[i]);
@@ -1186,8 +994,180 @@ function resolveEpisodeServers(ep) {
 }
 
 // ==========================================================================================
+// 6) TMDB / CINEMETA ESLESTIRME
+// ==========================================================================================
+
+function fetchTmdbMeta(id, mediaType) {
+  var kind = mediaType === 'movie' ? 'movie' : 'tv';
+  var url = TMDB_BASE_URL + '/' + kind + '/' + id + '?api_key=' + TMDB_API_KEY + '&language=tr-TR';
+  return externalGet(url).then(function (res) {
+    var data = jsonLoose(res.text);
+    if (!data) throw new Error('TMDB meta JSON bozuk (id: ' + id + ')');
+    return {
+      names: [data.original_name || data.original_title, data.name || data.title],
+      year: yearOf(data.first_air_date || data.release_date),
+      kind: kind,
+    };
+  });
+}
+
+function fetchCinemetaMeta(imdbId) {
+  return externalGet(CINEMETA_URL + 'series/' + imdbId + '.json').then(function (res) {
+    var meta = (jsonLoose(res.text) || {}).meta || {};
+    return { names: [meta.name, meta.originalName], year: yearOf(meta.released), kind: 'tv' };
+  }).catch(function () {
+    return externalGet(CINEMETA_URL + 'movie/' + imdbId + '.json').then(function (res) {
+      var meta = (jsonLoose(res.text) || {}).meta || {};
+      return { names: [meta.name, meta.originalName], year: yearOf(meta.released), kind: 'movie' };
+    });
+  });
+}
+
+/** CizgiMax'ta tum icerikler /diziler/ altindadir; bolum sayfasi ise -bolum-izle icerir. */
+function urlKind(url) {
+  url = String(url || '');
+  if (/-bolum-izle\/?$/i.test(url) || /\/[a-z0-9-]+-[0-9]+-sezon-[0-9]+-bolum-izle\//i.test(url)) return 'episode';
+  if (/\/diziler\//.test(url)) return 'series';
+  return '';
+}
+
+function pickBestItem(items, names, year, wantKind) {
+  var best = null;
+  var bestScore = -1;
+  for (var i = 0; i < items.length; i++) {
+    var item = items[i];
+    var a = normalizeTitle(item.title);
+    if (!a) continue;
+    var nameScore = 0;
+    for (var n = 0; n < names.length; n++) {
+      var b = normalizeTitle(names[n]);
+      if (!b) continue;
+      if (a === b) nameScore = Math.max(nameScore, 100);
+      else if (a.indexOf(b) !== -1 || b.indexOf(a) !== -1) nameScore = Math.max(nameScore, 80);
+      else if (diceSimilarity(a, b) >= 0.7) nameScore = Math.max(nameScore, 70);
+    }
+    if (nameScore === 0) continue;
+    var score = nameScore;
+    var itemKind = urlKind(item.url);
+    // tur eslesmesi tercih edilir ama tek basina eleme yapmaz
+    if (wantKind && itemKind === 'episode' && wantKind !== 'episode') score -= 15;
+    if (itemKind === 'series') score += 5;
+    var cardYear = parseInt(item.year, 10);
+    if (!isNaN(cardYear) && year) {
+      if (cardYear === year) score += 20;
+      else if (Math.abs(cardYear - year) <= 1) score += 10;
+    }
+    if (score > bestScore) { bestScore = score; best = item; }
+  }
+  return bestScore >= 70 ? best : null;
+}
+
+// ==========================================================================================
+// 7) SITE ARAMASI (suggest API -> HTML yedek; asciiFold katlama ile)
+// ==========================================================================================
+
+/** Canli arama onerileri: /api/search/suggest/?q= */
+function searchSuggest(q) {
+  return siteGetText('/api/search/suggest/?q=' + encodeURIComponent(q), 'arama onerileri', {
+    accept: 'application/json, text/plain, */*',
+  }).then(function (text) {
+    return parseSuggest(jsonLoose(text));
+  }).catch(function () {
+    return [];
+  });
+}
+
+/** HTML arama yedegi: /ara/?q= (film-item kartlari). */
+function searchHtml(q) {
+  return siteGetText('/ara/?q=' + encodeURIComponent(q), 'arama sayfasi').then(function (html) {
+    var cards = parseCards(html);
+    var out = [];
+    for (var i = 0; i < cards.length; i++) {
+      var c = cards[i];
+      var u = c.seriesUrl || c.url;
+      if (!u) continue;
+      out.push({ id: c.id, title: c.title, url: u, poster: c.poster, year: c.year });
+    }
+    return out;
+  }).catch(function () {
+    return [];
+  });
+}
+
+/** Iki arama kaynagini URL bazli tekillestirerek birlestirir. */
+function mergeResults(listA, listB) {
+  var seen = {};
+  var out = [];
+  var lists = [listA, listB];
+  for (var l = 0; l < lists.length; l++) {
+    for (var i = 0; i < lists[l].length; i++) {
+      var it = lists[l][i];
+      if (!it || !it.url || !it.title) continue;
+      if (seen[it.url]) continue;
+      seen[it.url] = true;
+      out.push(it);
+    }
+  }
+  return out;
+}
+
+function searchSite(query) {
+  return searchSuggest(query).then(function (suggestItems) {
+    return searchHtml(query).then(function (htmlItems) {
+      return mergeResults(suggestItems, htmlItems);
+    });
+  });
+}
+
+/** TMDB/Cinemeta id'sini site kartina esler. Donus: {id,title,url,year,poster}. */
+function resolveSiteCard(id, mediaType) {
+  var metaTask = (typeof id === 'string' && id.indexOf('tt') === 0)
+    ? fetchCinemetaMeta(id)
+    : fetchTmdbMeta(id, mediaType);
+
+  return metaTask.then(function (meta) {
+    var names = [];
+    for (var i = 0; i < meta.names.length; i++) {
+      if (meta.names[i]) names.push(meta.names[i]);
+    }
+    if (!names.length) throw new Error('Baslik adi bulunamadi (id: ' + id + ')');
+
+    var wantKind = mediaType === 'movie' ? 'movie' : 'series';
+    var tryIndex = 0;
+    function tryNext() {
+      if (tryIndex >= names.length) {
+        // Son sans: ilk isimle aranan sonuçlar arasindan gevsek eslestirme
+        return searchSite(names[0]).then(function (items) {
+          var fallback = pickBestItem(items, names, meta.year, wantKind);
+          if (!fallback) throw new Error('CizgiMax uzerinde bulunamadi: ' + names.join(' / '));
+          return fallback;
+        });
+      }
+      var query = names[tryIndex++];
+      return searchSite(query).then(function (items) {
+        var match = pickBestItem(items, names, meta.year, wantKind);
+        if (match) return match;
+        return tryNext();
+      });
+    }
+    return tryNext();
+  });
+}
+
+// ==========================================================================================
 // 8) AKIS BICIMLEME + NUVIO ANA GIRIS
 // ==========================================================================================
+
+function qualityRank(label) {
+  var m = String(label || '').match(/([0-9]+)p/);
+  return m ? parseInt(m[1], 10) : 0;
+}
+
+function langSuffix(srv) {
+  if (srv && srv.lang === 'dub') return ' (Turkce Dublaj)';
+  if (srv && srv.lang === 'sub') return ' (Turkce Altyazi)';
+  return '';
+}
 
 function headersForSource(url) {
   var u = String(url || '');
@@ -1201,17 +1181,18 @@ function headersForSource(url) {
   return {};
 }
 
-function formatServerResult(resolved, mediaTitle) {
+function formatSourceLinks(resolved, mediaTitle, srv) {
   if (!resolved || !resolved.ok || !resolved.sources || !resolved.sources.length) return [];
   var out = [];
   var seen = {};
+  var suffix = langSuffix(srv);
   for (var i = 0; i < resolved.sources.length; i++) {
     var src = resolved.sources[i];
     if (!src || !src.url) continue;
     if (seen[src.url]) continue;
     seen[src.url] = true;
     out.push({
-      name: '⌜ ÇizgiMax ⌟ | ' + (resolved.label || resolved.provider || 'Kaynak') + ' | ' + (src.quality || 'auto'),
+      name: '⌜ ÇizgiMax ⌟ | ' + (resolved.label || src.label || resolved.provider || 'Kaynak') + suffix + ' | ' + (src.quality || 'auto'),
       title: mediaTitle || '',
       url: src.url,
       quality: src.quality || 'auto',
@@ -1223,11 +1204,6 @@ function formatServerResult(resolved, mediaTitle) {
   return out;
 }
 
-function qualityRank(label) {
-  var m = String(label || '').match(/([0-9]+)p/);
-  return m ? parseInt(m[1], 10) : 0;
-}
-
 function buildStreamsForPage(pageUrl, mediaTitle) {
   return siteGetText(pageUrl, 'bolum sayfasi').then(function (html) {
     var ep = parseEpisode(html, pageUrl);
@@ -1235,7 +1211,7 @@ function buildStreamsForPage(pageUrl, mediaTitle) {
     return resolveEpisodeServers(ep).then(function (results) {
       var links = [];
       for (var i = 0; i < results.length; i++) {
-        links = links.concat(formatServerResult(results[i], mediaTitle));
+        links = links.concat(formatSourceLinks(results[i], mediaTitle, results[i].srvHint));
       }
       links.sort(function (a, b) { return qualityRank(b.quality) - qualityRank(a.quality); });
       return links;
@@ -1243,10 +1219,10 @@ function buildStreamsForPage(pageUrl, mediaTitle) {
   });
 }
 
-/** Kart sayfasini oynatilabilir bolum sayfasina donusturur (S/E hedefiyle). */
+/** Kart/dizi sayfasini oynatilabilir bolum sayfasina donusturur (S/E hedefiyle). */
 function pickPlayablePage(card, wantSeason, wantEpisode) {
-  return siteGetText(card.url, 'dizi sayfasi').then(function (html) {
-    // Kart dogrudan oynatilabilir bir sayfa ise (tek bolumluk icerik / film)
+  return siteGetText(card.url, 'icerik sayfasi').then(function (html) {
+    // Kart dogrudan oynatilabilir bir sayfa ise (bolum/film sayfasi)
     if (parseServers(html).length) {
       return { url: card.url, title: card.title };
     }
@@ -1255,6 +1231,7 @@ function pickPlayablePage(card, wantSeason, wantEpisode) {
     for (var i = 0; i < series.episodes.length; i++) eps.push(series.episodes[i]);
     if (!eps.length) throw new Error('Bolum bulunamadi: ' + card.title);
 
+    // 1) S/E birebir -> 2) S1 + E -> 3) herhangi sezon + E -> 4) ilk bolum
     var target = null;
     for (var k = 0; k < eps.length; k++) {
       if (eps[k].season === wantSeason && eps[k].number === wantEpisode) { target = eps[k]; break; }
@@ -1303,6 +1280,9 @@ function getStreams(id, mediaType, season, episode) {
   }).then(function (target) {
     log('bolum secildi', { url: target.url, title: target.title });
     return buildStreamsForPage(target.url, target.title);
+  }).then(function (streams) {
+    log('akis hazir', { adet: streams.length });
+    return streams;
   }).catch(function (err) {
     log('HATA: ' + (err && err.message ? err.message : err));
     return [];
