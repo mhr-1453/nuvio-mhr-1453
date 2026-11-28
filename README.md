@@ -21,7 +21,7 @@ Nuvio uygulaması için Türkçe içerik eklentileri.
 | **AnimeciX** | animecix.tv | Anime (Türkçe altyazılı + dublaj) | MP4, m3u8 |
 | **SuperFilmIzle** | superfilmizle2.icu | Film, dizi, anime (Türkçe) | m3u8 |
 | **FilmIzyon** | filmizyon.net | Film, dizi, anime (Türkçe) | m3u8 |
-| **SetFilmIzle** | setfilmizle.ltd | Film, dizi (Türkçe) | m3u8 |
+| **ÇizgiMax** | cizgimax.online | Çizgi film, anime, dizi (Türkçe) | m3u8, MP4 |
 
 ## Yasal Uyarı
 
