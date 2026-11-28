@@ -1,8 +1,8 @@
 {
   "name": "mhr-1453'ün deposu",
   "author": "mhr-1453",
-  "version": "1.4.0",
-  "description": "Turkce icerik eklentileri: AnimeciX (animecix.tv), SuperFilmIzle (superfilmizle2.icu), FilmIzyon (filmizyon.net) ve SetFilmIzle (setfilmizle.ltd) akislari.",
+  "version": "1.5.0",
+  "description": "Turkce icerik eklentileri: AnimeciX (animecix.tv), SuperFilmIzle (superfilmizle2.icu), FilmIzyon (filmizyon.net) ve CizgiMax (cizgimax.online) akislari.",
   "scrapers": [
     {
       "id": "animecix",
@@ -77,19 +77,21 @@
       "supportsExternalPlayer": true
     },
     {
-      "id": "setfilmizle",
-      "name": "SetFilmIzle",
-      "description": "SetFilmIzle (setfilmizle.ltd) uzerinden Turkce film ve dizi akislari. SetPlay oynatici zincirini (bridge -> fastplay -> X-Sp korumali HLS) cozer, Turkce altyazi izlerini destekler.",
+      "id": "cizgimax",
+      "name": "ÇizgiMax",
+      "description": "CizgiMax (cizgimax.online) uzerinden Turkce cizgi film, anime ve dizi akislari. Dzen, Sibnet, np ve VidMoly oynaticilarini HLS/MP4 olarak cozer, Turkce altyazi izlerini destekler.",
       "version": "1.0.0",
-      "author": "SetFilmIzle Scraper",
+      "author": "CizgiMax Scraper",
       "supportedTypes": [
         "movie",
-        "tv"
+        "tv",
+        "anime"
       ],
-      "filename": "providers/setfilmizle.js",
+      "filename": "providers/cizgimax.js",
       "enabled": true,
       "formats": [
-        "m3u8"
+        "m3u8",
+        "mp4"
       ],
       "logo": "",
       "contentLanguage": [
